@@ -1,0 +1,43 @@
+platform: "sevenrooms" # or "resy"
+
+target_date: "2026-06-11"
+party_size: 2
+drop_time: "09:00" # local time HH:MM
+retry_window_seconds: 10
+
+timezone: "America/New_York"
+# 7:00 PM – 9:30 PM ET (expanded every 15 min → 11 slots)
+preferred_start: "19:00"
+preferred_end: "21:30"
+preferred_interval_minutes: 15
+
+# Option B: explicit list (merged with range if both are set)
+# preferred_times:
+#   - "19:00"
+#   - "19:30"
+#   - "20:00"
+#   - "20:30"
+
+resy:
+  api_key: ""
+  auth_token: ""
+  venue_id: ""
+
+sevenrooms:
+  venue_id: ""
+  client_token: ""
+  headers:
+    x-csrf-token: ""
+    cookie: ""
+
+guest:
+  first_name: ""
+  last_name: ""
+  email: ""
+  phone: ""
+
+twilio:
+  account_sid: ""
+  auth_token: ""
+  from: ""
+  to: ""

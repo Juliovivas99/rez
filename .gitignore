@@ -1,0 +1,4 @@
+configs/
+confirmation.json
+*.log
+reservation-bot
