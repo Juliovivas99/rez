@@ -48,7 +48,8 @@ func main() {
 
 	scheduler, err := core.SyncNTP()
 	if err != nil {
-		log.Fatal().Err(err).Msg("ntp sync failed")
+		log.Warn().Err(err).Msg("ntp sync failed; using system clock (chrony/NTP on the host is still recommended)")
+		scheduler = &core.Scheduler{}
 	}
 
 	probeURL := platform.ClockProbeURL()

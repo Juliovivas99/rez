@@ -18,7 +18,18 @@ import (
 const resyBase = "https://api.resy.com"
 
 type Resy struct {
-	cfg *config.Config
+	cfg               *config.Config
+	paymentMethodID   int
+	paymentMethodOnce sync.Once
+	paymentMethodErr  error
+}
+
+type resyUserResponse struct {
+	PaymentMethodID int `json:"payment_method_id"`
+	PaymentMethods  []struct {
+		ID        int  `json:"id"`
+		IsDefault bool `json:"is_default"`
+	} `json:"payment_methods"`
 }
 
 func (r *Resy) Name() string { return "resy" }
@@ -31,6 +42,9 @@ func (r *Resy) ClockProbeURL() string {
 	q.Set("day", r.cfg.TargetDate)
 	q.Set("lat", "0")
 	q.Set("long", "0")
+	if tf := r.cfg.Resy.TimeFilter; tf != "" {
+		q.Set("time_filter", tf)
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -144,6 +158,9 @@ func (r *Resy) fetchFind(ctx context.Context, client *http.Client) (map[string]s
 	q.Set("day", r.cfg.TargetDate)
 	q.Set("lat", "0")
 	q.Set("long", "0")
+	if tf := r.cfg.Resy.TimeFilter; tf != "" {
+		q.Set("time_filter", tf)
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -186,17 +203,21 @@ func (r *Resy) fetchFind(ctx context.Context, client *http.Client) (map[string]s
 }
 
 func (r *Resy) getBookToken(ctx context.Context, client *http.Client, configID string) (string, error) {
-	form := url.Values{}
-	form.Set("config_id", configID)
-	form.Set("party_size", fmt.Sprintf("%d", r.cfg.PartySize))
-	form.Set("day", r.cfg.TargetDate)
+	payload, err := json.Marshal(map[string]any{
+		"config_id":  configID,
+		"party_size": r.cfg.PartySize,
+		"day":        r.cfg.TargetDate,
+	})
+	if err != nil {
+		return "", err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resyBase+"/3/details", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resyBase+"/3/details", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", err
 	}
 	r.setHeaders(req)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -225,9 +246,14 @@ func (r *Resy) getBookToken(ctx context.Context, client *http.Client, configID s
 }
 
 func (r *Resy) book(ctx context.Context, client *http.Client, bookToken string) ([]byte, error) {
+	paymentID, err := r.resolvePaymentMethodID(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+
 	form := url.Values{}
 	form.Set("book_token", bookToken)
-	form.Set("struct_payment_method", `{"id":0}`)
+	form.Set("struct_payment_method", fmt.Sprintf(`{"id":%d}`, paymentID))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resyBase+"/3/book", strings.NewReader(form.Encode()))
 	if err != nil {
@@ -252,6 +278,55 @@ func (r *Resy) book(ctx context.Context, client *http.Client, bookToken string) 
 		return nil, fmt.Errorf("book status %d: %s", resp.StatusCode, string(body))
 	}
 	return body, nil
+}
+
+func (r *Resy) resolvePaymentMethodID(ctx context.Context, client *http.Client) (int, error) {
+	if r.cfg.Resy.PaymentMethodID > 0 {
+		return r.cfg.Resy.PaymentMethodID, nil
+	}
+
+	r.paymentMethodOnce.Do(func() {
+		r.paymentMethodID, r.paymentMethodErr = r.fetchDefaultPaymentMethodID(ctx, client)
+	})
+	return r.paymentMethodID, r.paymentMethodErr
+}
+
+func (r *Resy) fetchDefaultPaymentMethodID(ctx context.Context, client *http.Client) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resyBase+"/2/user", nil)
+	if err != nil {
+		return 0, err
+	}
+	r.setHeaders(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("user status %d: %s", resp.StatusCode, truncate(body, 256))
+	}
+
+	var parsed resyUserResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, err
+	}
+	if parsed.PaymentMethodID > 0 {
+		return parsed.PaymentMethodID, nil
+	}
+	for _, pm := range parsed.PaymentMethods {
+		if pm.IsDefault {
+			return pm.ID, nil
+		}
+	}
+	if len(parsed.PaymentMethods) > 0 {
+		return parsed.PaymentMethods[0].ID, nil
+	}
+	return 0, fmt.Errorf("no payment method on resy account")
 }
 
 func (r *Resy) setHeaders(req *http.Request) {

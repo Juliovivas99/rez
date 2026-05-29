@@ -29,9 +29,11 @@ type Config struct {
 }
 
 type ResyConfig struct {
-	APIKey    string `mapstructure:"api_key"`
-	AuthToken string `mapstructure:"auth_token"`
-	VenueID   string `mapstructure:"venue_id"`
+	APIKey          string `mapstructure:"api_key"`
+	AuthToken       string `mapstructure:"auth_token"`
+	VenueID         string `mapstructure:"venue_id"`
+	TimeFilter      string `mapstructure:"time_filter"` // optional /4/find time_filter (HH:MM)
+	PaymentMethodID int    `mapstructure:"payment_method_id"`
 }
 
 type SevenRoomsConfig struct {
@@ -63,10 +65,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	loadDotEnv()
+
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+
+	cfg.applyEnvSecrets()
 
 	cfg.resolveTargetDate()
 	if err := cfg.expandPreferredTimes(); err != nil {
@@ -152,7 +158,7 @@ func (c *Config) validate() error {
 	switch c.Platform {
 	case "resy":
 		if c.Resy.APIKey == "" || c.Resy.AuthToken == "" || c.Resy.VenueID == "" {
-			return fmt.Errorf("resy.api_key, resy.auth_token, and resy.venue_id are required")
+			return fmt.Errorf("resy.venue_id is required in config; set RESY_API_KEY and RESY_AUTH_TOKEN in .env (see .env.example)")
 		}
 	case "sevenrooms":
 		if c.SevenRooms.VenueID == "" {

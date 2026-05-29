@@ -19,9 +19,7 @@ preferred_interval_minutes: 15
 #   - "20:30"
 
 resy:
-  api_key: ""
-  auth_token: ""
-  venue_id: ""
+  venue_id: "" # RESY_API_KEY and RESY_AUTH_TOKEN live in .env
 
 sevenrooms:
   venue_id: ""

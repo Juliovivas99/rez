@@ -1,0 +1,15 @@
+# Copy to configs/4-charles.yaml locally (configs/ is gitignored).
+# On droplet: scp to /opt/reservation-bot/config.yaml or use deploy.sh from your laptop.
+platform: "resy"
+restaurant_name: "4 Charles"
+drop_time: "09:00"
+drop_days_advance: 20
+party_size: 2
+retry_window_seconds: 10
+retry_interval_ms: 300
+timezone: "America/New_York"
+preferred_start: "19:00"
+preferred_end: "21:30"
+preferred_interval_minutes: 15
+resy:
+  venue_id: "834"

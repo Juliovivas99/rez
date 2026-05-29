@@ -54,6 +54,11 @@ deploy_one() {
   ssh "${REMOTE_USER}@${ip}" "mkdir -p ${REMOTE_DIR}"
   scp "$BINARY" "${REMOTE_USER}@${ip}:${REMOTE_DIR}/${BINARY}"
   scp "$config_file" "${REMOTE_USER}@${ip}:${REMOTE_DIR}/config.yaml"
+  if [[ -f .env ]]; then
+    scp .env "${REMOTE_USER}@${ip}:${REMOTE_DIR}/.env"
+  else
+    echo "[$name] warn: no .env in repo root; Resy credentials will be missing on droplet"
+  fi
 
   ssh "${REMOTE_USER}@${ip}" bash -s <<EOF
 set -euo pipefail
