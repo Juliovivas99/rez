@@ -2,4 +2,5 @@
 configs/
 confirmation.json
 *.log
+observe/
 reservation-bot

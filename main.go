@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -22,6 +23,11 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	dryRun := flag.Bool("dry-run", false, "run timing and availability checks without booking")
 	runNow := flag.Bool("now", false, "skip scheduler and snipe immediately (for testing)")
+	observe := flag.Bool("observe", false, "trace Resy API + poll /4/find around drop (runs alongside snipe)")
+	observeOnly := flag.Bool("observe-only", false, "observe without sniping (research mode)")
+	observeDir := flag.String("observe-dir", "observe", "directory for observe logs and report")
+	observePollMS := flag.Int("observe-poll-ms", 250, "poll /4/find interval during observe mode")
+	observeLeadSec := flag.Int("observe-lead-sec", 120, "seconds before drop to start polling in observe mode")
 	flag.Parse()
 
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
@@ -41,6 +47,24 @@ func main() {
 	}
 
 	client := newHTTPClient()
+	if *observe {
+		if err := os.MkdirAll(*observeDir, 0o755); err != nil {
+			log.Fatal().Err(err).Str("dir", *observeDir).Msg("failed to create observe dir")
+		}
+		tracePath := filepath.Join(*observeDir, "api-trace.jsonl")
+		traceFile, err := os.Create(tracePath)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create api trace log")
+		}
+		defer traceFile.Close()
+		base := client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		client.Transport = core.NewTracingTransport(base, traceFile, 768)
+		log.Info().Str("path", tracePath).Msg("API trace logging enabled")
+	}
+
 	notifier := core.NewNotifier(cfg.Twilio, client)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -77,11 +101,85 @@ func main() {
 		Int("drop_days_advance", cfg.DropDaysAdvance).
 		Time("drop_at", dropAt).
 		Bool("dry_run", *dryRun).
+		Bool("observe", *observe).
+		Bool("observe_only", *observeOnly).
 		Bool("now", *runNow).
 		Dur("ntp_offset_ms", scheduler.NTPOffset).
 		Dur("server_offset_ms", scheduler.ServerOffset).
 		Dur("total_offset_ms", scheduler.TotalOffset()).
 		Msg("reservation bot starting")
+
+	retryUntil := dropAt.Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
+	if *runNow {
+		retryUntil = scheduler.Now().Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
+	}
+
+	observeOpts := core.ObserveOptions{
+		Dir:          *observeDir,
+		PollInterval: time.Duration(*observePollMS) * time.Millisecond,
+		LeadTime:     time.Duration(*observeLeadSec) * time.Second,
+		SkipDropWait: true, // main thread owns precision drop wait
+	}
+
+	var observeHandle *core.ObserveHandle
+	if *observe || *observeOnly {
+		poller, ok := platform.(platforms.SlotPoller)
+		if !ok {
+			log.Fatal().Str("platform", platform.Name()).Msg("observe requires resy")
+		}
+		if *observePollMS < 100 {
+			log.Fatal().Int("observe_poll_ms", *observePollMS).Msg("observe-poll-ms must be >= 100")
+		}
+		if *observeOnly && *dryRun {
+			log.Warn().Msg("--dry-run ignored with --observe-only")
+		}
+		observeDropAt := dropAt
+		observeEndAt := retryUntil
+		if *runNow {
+			log.Warn().Msg("scheduler skipped (--now)")
+			observeDropAt = scheduler.Now()
+			observeEndAt = observeDropAt.Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
+		}
+		observeHandle = core.StartObserve(ctx, cfg, scheduler, poller, client, observeDropAt, observeEndAt, probeURL, probeReq, observeOpts)
+		log.Info().
+			Str("dir", *observeDir).
+			Bool("snipe", !*observeOnly).
+			Msg("background observe started")
+	}
+
+	waitObserve := func() {
+		if observeHandle == nil {
+			return
+		}
+		report, err := observeHandle.Wait()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn().Err(err).Msg("observe finished with error")
+		}
+		if report != nil {
+			log.Info().
+				Str("report_dir", *observeDir).
+				Int("released_at_drop", len(report.ReleasedAtDrop)).
+				Int("unique_slots", len(report.AllSlotsSeen)).
+				Msg("observe report written")
+		}
+	}
+	defer waitObserve()
+
+	if *observeOnly {
+		if !*runNow {
+			if err := scheduler.WaitUntil(ctx, dropAt, client, probeURL, probeReq, false); err != nil {
+				log.Fatal().Err(err).Msg("scheduler interrupted")
+			}
+		}
+		for scheduler.Now().Before(retryUntil) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		return
+	}
 
 	if !*runNow {
 		if err := scheduler.WaitUntil(ctx, dropAt, client, probeURL, probeReq, *dryRun); err != nil {
@@ -89,11 +187,6 @@ func main() {
 		}
 	} else {
 		log.Warn().Msg("scheduler skipped (--now); sniping immediately")
-	}
-
-	retryUntil := dropAt.Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
-	if *runNow {
-		retryUntil = scheduler.Now().Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
 	}
 
 	rateLimitBackoff := 2 * time.Second
@@ -133,6 +226,16 @@ func main() {
 
 		if result.DryRun {
 			log.Info().Msg("dry-run complete, no booking submitted")
+			if !*observe {
+				return
+			}
+			for scheduler.Now().Before(retryUntil) {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
 			return
 		}
 

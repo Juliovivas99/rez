@@ -53,22 +53,6 @@ func (r *Resy) ConfigureClockProbe(req *http.Request) {
 	r.setHeaders(req)
 }
 
-type resyFindResponse struct {
-	Results struct {
-		Venues []struct {
-			Slots []struct {
-				Config struct {
-					Token string `json:"token"`
-					Type  string `json:"type"`
-				} `json:"config"`
-				Date struct {
-					Start string `json:"start"`
-				} `json:"date"`
-			} `json:"slots"`
-		} `json:"venues"`
-	} `json:"results"`
-}
-
 type resyDetailsResponse struct {
 	BookToken struct {
 		Value string `json:"value"`
@@ -151,53 +135,17 @@ func (r *Resy) Snipe(ctx context.Context, client *http.Client, cfg *config.Confi
 
 // fetchFind calls /4/find once and maps HH:MM -> config token for all returned slots.
 func (r *Resy) fetchFind(ctx context.Context, client *http.Client) (map[string]string, error) {
-	u, _ := url.Parse(resyBase + "/4/find")
-	q := u.Query()
-	q.Set("venue_id", r.cfg.Resy.VenueID)
-	q.Set("party_size", fmt.Sprintf("%d", r.cfg.PartySize))
-	q.Set("day", r.cfg.TargetDate)
-	q.Set("lat", "0")
-	q.Set("long", "0")
-	if tf := r.cfg.Resy.TimeFilter; tf != "" {
-		q.Set("time_filter", tf)
-	}
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	slots, _, err := r.FindSlots(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-	r.setHeaders(req)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 300 {
-		if isRateLimitStatus(resp.StatusCode) {
-			return nil, fmt.Errorf("%w: find status %d", ErrRateLimited, resp.StatusCode)
-		}
-		return nil, fmt.Errorf("find status %d: %s", resp.StatusCode, truncate(body, 256))
-	}
-
-	var parsed resyFindResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-
 	out := make(map[string]string)
-	for _, venue := range parsed.Results.Venues {
-		for _, slot := range venue.Slots {
-			slotTime := extractTime(slot.Date.Start)
-			if slotTime != "" && slot.Config.Token != "" {
-				out[slotTime] = slot.Config.Token
-			}
+	for _, slot := range slots {
+		if existing, ok := out[slot.Time]; ok && existing != "" {
+			// Keep first token per time; snipe uses preferred_times order.
+			continue
 		}
+		out[slot.Time] = slot.Token
 	}
 	return out, nil
 }
